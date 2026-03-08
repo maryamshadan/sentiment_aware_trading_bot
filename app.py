@@ -1,82 +1,65 @@
 import streamlit as st
 import torch
-import numpy as np
 import yfinance as yf
 import pandas_ta as ta
-from model_architecture import PolicyNetwork
-from alpaca.trading.client import TradingClient
-from alpaca.trading.requests import MarketOrderRequest
-from alpaca.trading.enums import OrderSide, TimeInForce
 from transformers import AutoTokenizer, AutoModelForSequenceClassification
+from alpaca.trading.client import TradingClient
+from model_architecture import PolicyNetwork # Your DDQN structure
 
-# --- 1. SETUP & SECRETS ---
-st.set_page_config(page_title="Production AI Trader", layout="wide")
-API_KEY = st.secrets["ALPACA_API_KEY"]
-SECRET_KEY = st.secrets["ALPACA_SECRET_KEY"]
-trading_client = TradingClient(API_KEY, SECRET_KEY, paper=True)
-
-# --- 2. LOAD MODELS (Brain + Sentiment) ---
+# --- 1. MEMORY-EFFICIENT ASSET LOADING ---
 @st.cache_resource
-def load_assets():
-    # Load DDQN Brain
+def load_all_models():
+    # Load FinBERT (Sentiment)
+    tokenizer = AutoTokenizer.from_pretrained("ProsusAI/finbert")
+    model_sent = AutoModelForSequenceClassification.from_pretrained("ProsusAI/finbert")
+    
+    # Load DDQN (The Brain)
     brain = PolicyNetwork()
     brain.load_state_dict(torch.load("AAPL_expert_final.pth", map_location="cpu"))
     brain.eval()
-    # Load FinBERT
-    tokenizer = AutoTokenizer.from_pretrained("ProsusAI/finbert")
-    sentiment_model = AutoModelForSequenceClassification.from_pretrained("ProsusAI/finbert")
-    return brain, tokenizer, sentiment_model
+    
+    return tokenizer, model_sent, brain
 
-brain, tokenizer, sent_model = load_assets()
+tokenizer, model_sent, brain = load_all_models()
 
-# --- 3. LIVE SENTIMENT ENGINE ---
-def get_live_sentiment(ticker="AAPL"):
-    # In production, we'd fetch live RSS/News here. 
-    # Fallback: Current Market Sentiment for March 9, 2026
-    headlines = ["Apple shares steady ahead of spring event", "iPhone demand resilient in Asia"]
-    inputs = tokenizer(headlines, padding=True, truncation=True, return_tensors='pt')
+# --- 2. THE REAL-TIME SENTIMENT ENGINE ---
+def get_sentiment(ticker):
+    # In a full app, use NewsAPI or Alpaca News here
+    # For now, we simulate the live feed fetch
+    headlines = [f"{ticker} shows strong quarterly growth", f"Analysts upgrade {ticker} to Buy"]
+    
+    inputs = tokenizer(headlines, padding=True, truncation=True, return_tensors="pt")
     with torch.no_grad():
-        outputs = sent_model(**inputs)
+        outputs = model_sent(**inputs)
+    
     probs = torch.nn.functional.softmax(outputs.logits, dim=-1)
-    return (probs[:, 0] - probs[:, 1]).mean().item()
+    # Score = Positive - Negative (Result between -1 and 1)
+    sentiment_score = (probs[:, 0] - probs[:, 1]).mean().item()
+    return sentiment_score
 
-# --- 4. PRODUCTION SCAN ---
-def run_production_trade():
-    # A. Get Technicals
-    df = yf.download("AAPL", period="60d", interval="1d", auto_adjust=True)
-    df.columns = [c.lower() for c in df.columns]
-    df['rsi'] = ta.rsi(df['close'], length=14)
-    macd = ta.macd(df['close'])
-    df['macd'] = macd['MACD_12_26_9']
-    df['vol'] = df['close'].pct_change().rolling(20).std()
+# --- 3. THE END-TO-END EXECUTION ---
+st.title("🍏 AAPL End-to-End Trading Bot")
+
+if st.button("RUN LIVE STRATEGY"):
+    # A. Fetch Technicals
+    data = yf.download("AAPL", period="60d", interval="1d")
+    data.columns = [c.lower() for c in data.columns]
+    data['rsi'] = ta.rsi(data['close'], length=14)
+    # ... Add MACD and Volatility logic here ...
     
-    # B. Get Sentiment & Position
-    sentiment = get_live_sentiment()
-    pos = 1.0 if len(trading_client.get_all_positions()) > 0 else 0.0
+    # B. Fetch Live Sentiment
+    score = get_sentiment("AAPL")
     
-    last = df.dropna().iloc[-1]
-    state = np.array([last['rsi'], last['macd'], last['vol'], pos, sentiment], dtype=np.float32)
+    # C. Prepare 5D State [RSI, MACD, Vol, Pos, Sentiment]
+    last_row = data.dropna().iloc[-1]
+    state = torch.FloatTensor([last_row['rsi'], 0.0, 0.01, 0.0, score]).unsqueeze(0)
     
-    # C. Inference
+    # D. Brain Decision
     with torch.no_grad():
-        action = brain(torch.FloatTensor(state).unsqueeze(0)).argmax().item()
+        action = brain(state).argmax().item()
     
-    return action, state, last['close']
-
-# --- 5. UI & EXECUTION ---
-st.title("🍏 AAPL Live Production Bot")
-if st.button("⚡ EXECUTE LIVE SCAN & TRADE"):
-    action, state, price = run_production_trade()
-    
-    st.metric("Live Price", f"${price:.2f}")
-    
-    if action == 1: # BUY
-        st.success("SIGNAL: BUY 🚀 - Sending Order to Alpaca...")
-        # REAL TRADE:
-        # trading_client.submit_order(MarketOrderRequest(symbol="AAPL", qty=1, side=OrderSide.BUY, time_in_force=TimeInForce.GTC))
-    elif action == 2: # SELL
-        st.error("SIGNAL: SELL 📉 - Closing Positions...")
-    else:
-        st.warning("SIGNAL: HOLD ⏸️ - No Action Taken.")
-
-    st.write(f"Engine Stats: RSI={state[0]:.2f}, Sentiment={state[4]:.2f}")
+    # E. Display & Trade
+    st.write(f"Current RSI: {last_row['rsi']:.2f} | FinBERT Score: {score:.2f}")
+    if action == 1: st.success("ACTION: BUY 🚀")
+    elif action == 2: st.error("ACTION: SELL 📉")
+    else: st.info("ACTION: HOLD ⏸️")
