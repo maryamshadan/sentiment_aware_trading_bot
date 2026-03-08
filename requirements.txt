@@ -1,9 +1,12 @@
+--extra-index-url https://download.pytorch.org
+torch
+torchvision
 streamlit
 yfinance
 pandas_ta
 alpaca-py
-numpy
-pandas
+transformers
+numexpr
 
 
 
