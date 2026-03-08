@@ -1,10 +1,9 @@
 streamlit
-torch
 yfinance
 pandas_ta
 alpaca-py
-transformers
 numpy
 pandas
+
 
 
